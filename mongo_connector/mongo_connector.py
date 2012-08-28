@@ -283,7 +283,7 @@ class Connector(threading.Thread):
         for thread in self.shard_set.values():
             thread.join()
 
-if __name__ == '__main__':
+def main():
     """Runs mongo connector
     """
 
@@ -451,3 +451,7 @@ if __name__ == '__main__':
             logging.info("Caught keyboard interrupt, exiting!")
             ct.join()
             break
+
+if __name__ == '__main__':
+    main()
+
