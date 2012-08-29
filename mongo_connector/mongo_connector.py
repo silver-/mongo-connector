@@ -44,7 +44,8 @@ class Connector(threading.Thread):
     """Checks the cluster for shards to tail.
     """
     def __init__(self, address, oplog_checkpoint, target_url, ns_set,
-                 u_key, auth_key, doc_manager=None, auth_username=None):
+                 u_key, auth_key, doc_manager=None, auth_username=None,
+                 nodes_discovery=True):
         file = inspect.getfile(inspect.currentframe())
         cmd_folder = os.path.realpath(os.path.abspath(os.path.split(file)[0]))
         if doc_manager is not None:
@@ -84,6 +85,9 @@ class Connector(threading.Thread):
 
         #Dict of OplogThread/timestamp pairs to record progress
         self.oplog_progress = LockingDict()
+
+        #Is cluster discovery enabled
+        self.nodes_discovery = nodes_discovery
 
         try:
             if target_url is None:
@@ -185,7 +189,8 @@ class Connector(threading.Thread):
             #stored as bson_ts
 
     def run(self):
-        """Discovers the mongo cluster and creates a thread for each primary.
+        """Discovers the mongo cluster (unless run with --no-discover option)
+        and creates a thread for each primary.
         """
         main_conn = pymongo.Connection(self.address)
         self.read_oplog_progress()
@@ -196,7 +201,36 @@ class Connector(threading.Thread):
         except pymongo.errors.OperationFailure:
             conn_type = "REPLSET"
 
-        if conn_type == "REPLSET":
+        if not self.nodes_discovery:
+            # don't care about connection type, just use gived address as is
+            oplog_coll = main_conn['local']['oplog.rs']
+            address = self.address
+
+            oplog = oplog_manager.OplogThread(main_conn, address, oplog_coll,
+                                              False, self.doc_manager,
+                                              self.oplog_progress,
+                                              self.ns_set, self.auth_key,
+                                              self.auth_username,
+                                              repl_set='')
+            self.shard_set[0] = oplog
+            logging.info('MongoConnector: Starting connection thread %s' %
+                         main_conn)
+            oplog.start()
+
+            while self.can_run:
+                if not self.shard_set[0].running:
+                    err_msg = "MongoConnector: OplogThread"
+                    set = str(self.shard_set[0])
+                    effect = "unexpectedly stopped! Shutting down."
+                    logging.error("%s %s %s" % (err_msg, set, effect))
+                    self.oplog_thread_join()
+                    self.doc_manager.stop()
+                    return
+
+                self.write_oplog_progress()
+                time.sleep(1)
+
+        elif conn_type == "REPLSET":
             #non sharded configuration
             oplog_coll = main_conn['local']['oplog.rs']
 
@@ -406,6 +440,13 @@ def main():
                       """ about making your own doc manager,"""
                       """ see Doc Manager section.""")
 
+    parser.add_option("--no-discovery", action="store_true", help=
+                      """Forbid discovery of replica set and sharded cluster"""
+                      """ members. Instead, consider address given in"""
+                      """ --main option to be a primary address and use it"""
+                      """ as is.  Use this option only if you know """
+                      """ what you doing. """)
+
     (options, args) = parser.parse_args()
 
     if options.doc_manager is None:
@@ -438,7 +479,8 @@ def main():
 
     ct = Connector(options.main_addr, options.oplog_config, options.url,
                    ns_set, options.u_key, key, options.doc_manager,
-                   auth_username=options.admin_name)
+                   auth_username=options.admin_name,
+                   nodes_discovery=not options.no_discovery)
 
     ct.start()
 
